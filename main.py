@@ -38,11 +38,10 @@ def main():
     title = '.'.join(Path(book_path).name.split('.')[:-1])
 
     print("\nLet's decide which sections of the epub to generate audio for:")
-    # sections = []
-    # for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
-    #     if ask_y_n(section):
-    #         sections.append(section)
-    sections = ["Synopsis.xhtml"]
+    sections = []
+    for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
+        if ask_y_n(section):
+            sections.append(section)
 
     print("\nProcessing sections...")
     sequences = []
@@ -128,7 +127,7 @@ def main():
     batch_size = 16
     num_batches = math.ceil(N / batch_size)
     print()
-    bar = Bar('Running...', max=N, suffix='Utterance: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
+    bar = Bar('Creating wav files...', max=N, suffix='Utterance: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
     bar.next(0)
     for batch_idx in range(num_batches):
         # Compute start and end indices of batch
@@ -154,15 +153,21 @@ def main():
 
         bar.next(len(batch_lengths))
     bar.finish()
-        
-    print("\nConverting wavs to mp3...")
+    
+    # Convert wav files to a single mp3
+    print()
+    bar = Bar("Aggregating wav files...", max=N, suffix='File: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
     if sys.platform.startswith("win"):
         AudioSegment.converter = os.getcwd() + "/utils/ffmpeg.exe"
     gap = AudioSegment.silent(600, frame_rate=h.sampling_rate)
     book = AudioSegment.empty()
     for i in range(N):
         book += AudioSegment.from_wav(f"{os.getcwd()}/temp/{i}.wav") + gap
+        bar.next()
     book += AudioSegment.silent(1000, frame_rate=h.sampling_rate)
+    bar.finish()
+
+    print("\nExporting to mp3...")
 
     bitrate = str((book.frame_rate * book.frame_width * 8 * book.channels) / 1000)
     book.export(f"{os.getcwd()}/output/{title}.mp3", format="mp3", bitrate=bitrate)
