@@ -38,10 +38,11 @@ def main():
     title = '.'.join(Path(book_path).name.split('.')[:-1])
 
     print("\nLet's decide which sections of the epub to generate audio for:")
-    sections = []
-    for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
-        if ask_y_n(section):
-            sections.append(section)
+    # sections = []
+    # for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
+    #     if ask_y_n(section):
+    #         sections.append(section)
+    sections = ["Synopsis.xhtml"]
 
     print("\nProcessing sections...")
     sequences = []
@@ -104,7 +105,7 @@ def main():
 
     # Initialize Tacotron2
     # Pretrained Tacotron2 assumes CUDA, so we manually load state_dict to support CPU-only machines
-    tacotron2 = torch.hub.load('nvidia/DeepLearningExamples:torchhub', 'nvidia_tacotron2', pretrained=False)
+    tacotron2 = torch.hub.load('nvidia/DeepLearningExamples:torchhub', 'nvidia_tacotron2', pretrained=False).to(device)
     checkpoint = torch.hub.load_state_dict_from_url('https://api.ngc.nvidia.com/v2/models/nvidia/tacotron2pyt_fp32/versions/1/files/nvidia_tacotron2pyt_fp32_20190306.pth', map_location=device)
     state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
     tacotron2.load_state_dict(state_dict)
