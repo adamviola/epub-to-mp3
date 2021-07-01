@@ -38,11 +38,10 @@ def main():
     title = '.'.join(Path(book_path).name.split('.')[:-1])
 
     print("\nLet's decide which sections of the epub to generate audio for:")
-    # sections = []
-    # for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
-    #     if ask_y_n(section):
-    #         sections.append(section)
-    sections = ["Synopsis.xhtml"]
+    sections = []
+    for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
+        if ask_y_n(section):
+            sections.append(section)
 
     print("\nProcessing sections...")
     sequences = []
