@@ -101,13 +101,18 @@ def main():
     # Preprocess lines for Tacotron2
     input_sequences, lengths = utils.prepare_input_sequence(sequences, cpu_run=device.type == 'cpu')
 
-    print("\nInitializing Tacotron2 and Hifi-GAN...")
+    print("\nInitializing Tacotron2 and HiFi-GAN...")
+
     # Initialize Tacotron2
-    tacotron2 = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_tacotron2', model_math='fp16').to(device)
+    # Pretrained Tacotron2 assumes CUDA, so we manually load state_dict to support CPU-only machines
+    tacotron2 = torch.hub.load('nvidia/DeepLearningExamples:torchhub', 'nvidia_tacotron2', pretrained=False)
+    checkpoint = torch.hub.load_state_dict_from_url('https://api.ngc.nvidia.com/v2/models/nvidia/tacotron2pyt_fp32/versions/1/files/nvidia_tacotron2pyt_fp32_20190306.pth', map_location=device)
+    state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
+    tacotron2.load_state_dict(state_dict)
     tacotron2.decoder.max_decoder_steps = 2000
     tacotron2.eval()
 
-    # Initialize Hifi-GAN
+    # Initialize HiFi-GAN
     with open('model/config.json') as f:
         data = f.read()
     json_config = json.loads(data)
@@ -139,7 +144,7 @@ def main():
             # Tacotron2: text -> mel-spectrograms
             mels, mel_lengths, _ = tacotron2.infer(batch_sequences, batch_lengths)
 
-            # Hifi-GAN: mel-spectrograms -> waveform
+            # HiFi-GAN: mel-spectrograms -> waveform
             audio = generator(mels).squeeze() * MAX_WAV_VALUE
 
         # Store audio to file
@@ -152,15 +157,15 @@ def main():
         
     print("\nConverting wavs to mp3...")
     if sys.platform.startswith("win"):
-        AudioSegment.converter = os.getcwd() + "\\utils\\ffmpeg.exe"
+        AudioSegment.converter = os.getcwd() + "/utils/ffmpeg.exe"
     gap = AudioSegment.silent(600, frame_rate=h.sampling_rate)
     book = AudioSegment.empty()
     for i in range(N):
-        book += AudioSegment.from_wav(f"{os.getcwd()}\\temp\\{i}.wav") + gap
+        book += AudioSegment.from_wav(f"{os.getcwd()}/temp/{i}.wav") + gap
     book += AudioSegment.silent(1000, frame_rate=h.sampling_rate)
 
     bitrate = str((book.frame_rate * book.frame_width * 8 * book.channels) / 1000)
-    book.export(f"{os.getcwd()}\\output\\{title}.mp3", format="mp3", bitrate=bitrate)
+    book.export(f"{os.getcwd()}/output/{title}.mp3", format="mp3", bitrate=bitrate)
 
     print("\nCleaning...")
     shutil.rmtree('temp')
