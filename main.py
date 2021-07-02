@@ -1,6 +1,7 @@
 from ebooklib import epub
 import torch
 from html_parser import html_to_text
+import numpy as np
 import os
 import json
 import math
@@ -8,7 +9,6 @@ from scipy.io.wavfile import write
 from pydub import AudioSegment
 import re
 from bar import Bar
-import shutil
 from pathlib import Path
 
 # Needed to do some ugly changes to sys.path to access Hifi-GAN files
@@ -39,7 +39,7 @@ def main():
 
     print("\nLet's decide which sections of the epub to generate audio for:")
     sections = []
-    for index, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
+    for _, section in sorted([get_spine_key(book)(itm) for itm in book.get_items()]):
         if ask_y_n(section):
             sections.append(section)
 
@@ -52,13 +52,15 @@ def main():
         for line in text.splitlines():
             line = line.strip()
 
-            line = re.sub(u'[“”"]', '', line)
-            line = re.sub(u'[‘’]', '\'', line)
-            line = re.sub(u" \'((?:.(?! \'))+)\'([ \.;—?!…])", r' \1\2', line)
+            line = re.sub(u'[“”"]', '', line) # Remove quotes
+            line = re.sub(u'[‘’]', '\'', line) # Replace single quotes with plain apostrophes
+            line = re.sub(u" \'((?:.(?! \'))+)\'([ \.;—?!…])", r' \1\2', line) # Remove apostrophes used as single-quotes
+                                                                               # Things that end in "s" are spoken as if they are possessive nouns
 
             if line == '':
                 continue
         
+            # Split lines on punctuation (incomplete list)
             split_line = re.split(u'([\.;—?!…])+', line)
             for i in range(0, len(split_line), 2):
                 sequence = split_line[i]
@@ -67,7 +69,8 @@ def main():
                 sequence = sequence.strip()
                 if sequence == '':
                     continue
-
+                
+                # Add back the punctuation (useful for ? or !)
                 sequence += punctuation
                 sequences.append(sequence)
 
@@ -77,8 +80,6 @@ def main():
         print("No text found.")
         exit()
 
-    os.makedirs('temp', exist_ok=True)
-
     # Check for CUDA
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -86,19 +87,6 @@ def main():
     else:
         device = torch.device('cpu')
         print('\nCUDA unavailable. Using CPU')
-
-    print("\nProcessing input...")
-    utils = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_tts_utils')
-
-    # NVIDIA reorders lines without telling us the order (!), so we compute order ourselves
-    # https://github.com/NVIDIA/DeepLearningExamples/blob/81ee705868a11d6fe18c12d237abe4a08aab5fd6/PyTorch/SpeechSynthesis/Tacotron2/tacotron2/entrypoints.py#L150
-    d = []
-    for i,text in enumerate(sequences):
-        d.append(torch.IntTensor(type(utils).text_to_sequence(text, ['english_cleaners'])[:]))
-    order = torch.argsort(torch.LongTensor([len(x) for x in d]), dim=0, descending=True)
-
-    # Preprocess lines for Tacotron2
-    input_sequences, lengths = utils.prepare_input_sequence(sequences, cpu_run=device.type == 'cpu')
 
     print("\nInitializing Tacotron2 and HiFi-GAN...")
 
@@ -110,6 +98,15 @@ def main():
     tacotron2.load_state_dict(state_dict)
     tacotron2.decoder.max_decoder_steps = 2000
     tacotron2.eval()
+
+    # Gets sorted-by-length order of preprocessed sequences (for Tacotron2)
+    # Used for batching sequences of similar length with each other
+    # https://github.com/NVIDIA/DeepLearningExamples/blob/81ee705868a11d6fe18c12d237abe4a08aab5fd6/PyTorch/SpeechSynthesis/Tacotron2/tacotron2/entrypoints.py#L150
+    utils = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_tts_utils')
+    d = []
+    for i,text in enumerate(sequences):
+        d.append(torch.IntTensor(type(utils).text_to_sequence(text, ['english_cleaners'])[:]))
+    order = torch.argsort(torch.LongTensor([len(x) for x in d]), dim=0, descending=True)
 
     # Initialize HiFi-GAN
     with open('model/config.json') as f:
@@ -124,20 +121,22 @@ def main():
 
     # Run TTS in batches
     N = len(sequences)
+
+    total_samples = 0
+    audio_segments = [None for _ in range(N)]
+
     batch_size = 16
     num_batches = math.ceil(N / batch_size)
     print()
-    bar = Bar('Creating wav files...', max=N, suffix='Utterance: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
+    bar = Bar('Running TTS...', max=N, suffix='Utterance: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
     bar.next(0)
     for batch_idx in range(num_batches):
         # Compute start and end indices of batch
         s = batch_idx * batch_size
         e = s + batch_size
 
-        # Trim sequences to the maximum length of sequences in the batch
-        batch_lengths = lengths[s:e]
-        batch_seq_length = max(lengths[s:e])
-        batch_sequences = input_sequences[s:e, :batch_seq_length]
+        # Preprocess batch of sequences for Tacotron2
+        batch_sequences, batch_lengths = utils.prepare_input_sequence([sequences[i] for i in order[s:e]], cpu_run=(device.type == 'cpu'))
         
         with torch.no_grad():
             # Tacotron2: text -> mel-spectrograms
@@ -146,38 +145,38 @@ def main():
             # HiFi-GAN: mel-spectrograms -> waveform
             audio = generator(mels).squeeze() * MAX_WAV_VALUE
 
-        # Store audio to file
+        # Store audio
         for i, l in zip(range(batch_size), mel_lengths):
-            line_audio = audio[i,:l * h.hop_size].cpu().numpy().astype('int16')
-            write(f"temp/{order[batch_idx * batch_size + i]}.wav", h.sampling_rate, line_audio)
+            sequence_audio = audio[i,:l * h.hop_size].cpu().numpy().astype('int16')
+            audio_segments[order[batch_idx * batch_size + i]] = sequence_audio
+            total_samples += len(sequence_audio)
 
         bar.next(len(batch_lengths))
     bar.finish()
     
-    # Convert wav files to a single mp3
-    print()
-    bar = Bar("Aggregating wav files...", max=N, suffix='File: %(index)d / %(max)d [%(elapsed_td)s / %(total_td)s]')
-    if sys.platform.startswith("win"):
-        AudioSegment.converter = os.getcwd() + "/utils/ffmpeg.exe"
-    gap = AudioSegment.silent(600, frame_rate=h.sampling_rate)
-    book = AudioSegment.empty()
-    for i in range(N):
-        book += AudioSegment.from_wav(f"{os.getcwd()}/temp/{i}.wav") + gap
-        bar.next()
-    book += AudioSegment.silent(1000, frame_rate=h.sampling_rate)
-    bar.finish()
-
     print("\nExporting to mp3...")
 
+    if sys.platform.startswith("win"):
+        AudioSegment.converter = os.getcwd() + "/utils/ffmpeg.exe"
+
+    # Convert wav files to a single mp3
+    gap = round(0.6 * h.sampling_rate) # 600ms of silence between utterances 
+    book_samples = np.zeros(total_samples + gap * N, dtype='int16')
+    idx = 0
+    for audio_segment in audio_segments:
+        length = len(audio_segment)
+        book_samples[idx:idx + length] = audio_segment
+        idx += length + gap
+
+    book = AudioSegment(book_samples.tobytes(), frame_rate=h.sampling_rate, sample_width=book_samples.dtype.itemsize, channels=1)
     bitrate = str((book.frame_rate * book.frame_width * 8 * book.channels) / 1000)
     book.export(f"{os.getcwd()}/output/{title}.mp3", format="mp3", bitrate=bitrate)
-
-    print("\nCleaning...")
-    shutil.rmtree('temp')
 
     print(f"\nDone! {title}.mp3 is in the 'output' directory.")
 
 
+# Thanks @oxinabox!
+# https://github.com/aerkalov/ebooklib/issues/149#issuecomment-370748657
 def get_spine_key(book):
     spine_keys = {id:(ii,id) for (ii,(id,show)) in enumerate(book.spine)}
     past_end = len(spine_keys)
