@@ -1,19 +1,22 @@
-from ebooklib import epub
-import torch
-from html_parser import html_to_text
-import numpy as np
-import os
+import argparse
 import json
 import math
-from scipy.io.wavfile import write
-from pydub import AudioSegment
-import re
-from bar import Bar
+import os
 from pathlib import Path
+import re
 
-# Needed to do some ugly changes to sys.path to access Hifi-GAN files
+from ebooklib import epub
+from pydub import AudioSegment
+import numpy as np
+import torch
+
+from html_parser import html_to_text
+from bar import Bar
+
+# Needed to do some ugly changes to sys.path to access HiFi-GAN files
+directory = Path(__file__).parent.resolve()
 import sys
-sys.path.append('hifi-gan/')
+sys.path.append(f"{directory}/hifi-gan/")
 from meldataset import MAX_WAV_VALUE
 from models import Generator
 from inference_e2e import load_checkpoint
@@ -22,20 +25,18 @@ from env import AttrDict
 line_end_chars = set(('.', '?', ';', '!'))
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('epub_path', help="Relative path to epub (from current directory)")
+    parser.add_argument('-o', '--output', default=f"{directory}/output", help="Relative path to output directory (from current directory)")
+    args = parser.parse_args()
 
-    # Check for path to epub
-    if len(sys.argv) < 2:
-        print("Missing relative path to book:\tpython main.py path/to/book.epub")
+    if not os.path.exists(args.epub_path):
+        print(f"Path '{args.epub_path}' does not exist.")
         exit()
 
-    book_path = sys.argv[1]
-    if not os.path.exists(book_path):
-        print(f"Path '{book_path}' does not exist.")
-        exit()
-
-    book = epub.read_epub(book_path)
-    print(f"Found '{book_path}'")
-    title = '.'.join(Path(book_path).name.split('.')[:-1])
+    book = epub.read_epub(args.epub_path)
+    print(f"Found '{args.epub_path}'")
+    title = '.'.join(Path(args.epub_path).name.split('.')[:-1])
 
     print("\nLet's decide which sections of the epub to generate audio for:")
     sections = []
@@ -56,7 +57,6 @@ def main():
             line = re.sub(u'[‘’]', '\'', line) # Replace single quotes with plain apostrophes
             line = re.sub(u" \'((?:.(?! \'))+)\'([ \.;—?!…])", r' \1\2', line) # Remove apostrophes used as single-quotes
                                                                                # Things that end in "s" are spoken as if they are possessive nouns
-
             if line == '':
                 continue
         
@@ -109,12 +109,12 @@ def main():
     order = torch.argsort(torch.LongTensor([len(x) for x in d]), dim=0, descending=True)
 
     # Initialize HiFi-GAN
-    with open('model/config.json') as f:
+    with open(f"{directory}/model/config.json") as f:
         data = f.read()
     json_config = json.loads(data)
     h = AttrDict(json_config)
     generator = Generator(h).to(device)
-    state_dict_g = load_checkpoint("model/generator_v1", device)
+    state_dict_g = load_checkpoint(f"{directory}/model/generator_v1", device)
     generator.load_state_dict(state_dict_g['generator'])
     generator.eval()
     generator.remove_weight_norm()
@@ -157,7 +157,7 @@ def main():
     print("\nExporting to mp3...")
 
     if sys.platform.startswith("win"):
-        AudioSegment.converter = os.getcwd() + "/utils/ffmpeg.exe"
+        AudioSegment.converter = f"{directory}/utils/ffmpeg.exe"
 
     # Convert wav files to a single mp3
     gap = round(0.6 * h.sampling_rate) # 600ms of silence between utterances 
@@ -170,9 +170,10 @@ def main():
 
     book = AudioSegment(book_samples.tobytes(), frame_rate=h.sampling_rate, sample_width=book_samples.dtype.itemsize, channels=1)
     bitrate = str((book.frame_rate * book.frame_width * 8 * book.channels) / 1000)
-    book.export(f"{os.getcwd()}/output/{title}.mp3", format="mp3", bitrate=bitrate)
+    os.makedirs(args.output, exist_ok=True)
+    book.export(f"{args.output}/{title}.mp3", format="mp3", bitrate=bitrate)
 
-    print(f"\nDone! {title}.mp3 is in the 'output' directory.")
+    print(f"\nDone! The mp3 is at '{args.output}/{title}.mp3'")
 
 
 # Thanks @oxinabox!
